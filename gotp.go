@@ -35,11 +35,6 @@ type Child interface {
 	Run(proc *Proc) error
 }
 
-type state struct {
-	status uint8
-	e error
-}
-
 type ChildSpecification struct {
 	ChildGen func() Child
 	ChildId string
@@ -50,7 +45,6 @@ type ChildSpecification struct {
 
 type ChildProc struct {
 	proc *Proc
-	stateHandle chan state
 }
 
 type SupervisorSpec struct {
@@ -62,18 +56,17 @@ type SupervisorSpec struct {
 
 type Supervisor struct {
 	SupervisorSpec
-	supervisorHandle chan state
-	supervisorControl chan Control
+	supervisorHandle chan State
 	childHandles []*ChildProc
-	childStates []state
+	childStates []State
 }
 
-func (super *Supervisor)makeSelectCases() []reflect.SelectCase {
-	cases := make([]reflect.SelectCase, 0, len(super.childHandles))
+func (super *Supervisor)makeSelectCases(control chan Control) []reflect.SelectCase {
+	cases := make([]reflect.SelectCase, 0, len(super.childHandles) + 1)
 	cases = append(cases,
 		reflect.SelectCase{
 			Dir: reflect.SelectRecv,
-			Chan: reflect.ValueOf(super.supervisorControl),
+			Chan: reflect.ValueOf(control),
 		},
 	)
 	for _, ch := range super.childHandles {
@@ -81,7 +74,7 @@ func (super *Supervisor)makeSelectCases() []reflect.SelectCase {
 			cases = append(cases,
 				reflect.SelectCase{
 					Dir: reflect.SelectRecv,
-					Chan: reflect.ValueOf(ch.stateHandle),
+					Chan: reflect.ValueOf(ch.proc.stateHandle),
 				},
 			)
 		}
@@ -94,7 +87,7 @@ func (super *Supervisor) stopAllChildren(status uint8) {
 		if super.childHandles[h] != nil {
 			super.childHandles[h].stop()
 			super.childHandles[h] = nil
-			super.childStates[h] = state{status: status}
+			super.childStates[h] = State{status: status}
 		}
 	}
 }
@@ -113,14 +106,27 @@ func (super *Supervisor) restartChildren() {
 				fmt.Printf("Failed to start child: %s\n", err)
 			}
 			super.childHandles[s] = &handle
-			super.childStates[s] = state{}
+			super.childStates[s] = State{}
 		}
 	}
 }
 
-func (super *Supervisor) supervise() {
-	for {
-		cases := super.makeSelectCases()
+func (super *Supervisor) Run(proc *Proc) error {
+	// Start up the children
+	for cSpec := range super.ChildSpecs {
+		handle, err := super.ChildSpecs[cSpec].start()
+		if err != nil {
+			fmt.Printf("Failed to start child: %s\n", err)
+			for liveSpec := 0; liveSpec < cSpec; liveSpec++ {
+				// TODO: SHUT DOWN OTHER CHILDREN AND SIGNAL ERROR?
+			}
+			return err
+		}
+		super.childHandles[cSpec] = &handle
+	}
+
+	for i := 0; i < 20; i++ {
+		cases := super.makeSelectCases(proc.Control)
 		chosen, value, _ := reflect.Select(cases)
 		if(chosen == 0) {
 			// This is the control channel.
@@ -130,7 +136,7 @@ func (super *Supervisor) supervise() {
 			chosen -= 1
 		}
 
-		childState := value.Interface().(state)
+		childState := value.Interface().(State)
 		if childState.status == STATUS_SHUTDOWN {
 			fmt.Printf("Child (%s) shut down.\n", super.ChildSpecs[chosen].ChildId)
 		} else if childState.e != nil {
@@ -139,7 +145,6 @@ func (super *Supervisor) supervise() {
 			fmt.Printf("Child (%s) died for unspecified reasons.\n", super.ChildSpecs[chosen].ChildId)
 		}
 
-		close(super.childHandles[chosen].stateHandle)
 		super.childHandles[chosen] = nil
 		super.childStates[chosen] = childState
 
@@ -150,36 +155,20 @@ func (super *Supervisor) supervise() {
 
 		super.restartChildren()
 	}
+	return nil
 }
 
-func (spec *SupervisorSpec) Start() (s *Supervisor, e error) {
-
-	s = &Supervisor{}
-	s.supervisorHandle = make(chan state)
-	s.supervisorControl = make(chan Control)
+func (spec *SupervisorSpec) CreateSupervisor() *Supervisor {
+	s := &Supervisor{}
+	s.supervisorHandle = make(chan State)
 	s.childHandles = make([]*ChildProc, len(spec.ChildSpecs))
-	s.childStates = make([]state, len(spec.ChildSpecs))
+	s.childStates = make([]State, len(spec.ChildSpecs))
 	s.SupervisorSpec = *spec
-
-	for cSpec := range s.ChildSpecs {
-		handle, err := s.ChildSpecs[cSpec].start()
-		if err != nil {
-			fmt.Printf("Failed to start child: %s\n", err)
-			for liveSpec := 0; liveSpec < cSpec; liveSpec++ {
-				// TODO: SHUT DOWN OTHER CHILDREN AND SIGNAL ERROR?
-			}
-			return nil, err
-		}
-		s.childHandles[cSpec] = &handle
-	}
-	go s.supervise()
-
-	return
+	return s
 }
 
 
 func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
-	ch.stateHandle = make(chan state, 1000)
 	child := cSpec.ChildGen()
 	proc := Spawn(func(p *Proc) {
 		childShutdown := false
@@ -187,22 +176,22 @@ func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
 			if cSpec.OnPanic == ON_PANIC_KILL_CHILD {
 				if r := recover(); r != nil {
 					fmt.Println("Recovered in f", r)
-					ch.stateHandle <- state { STATUS_ERROR, fmt.Errorf("%#v", r) }
+					ch.proc.stateHandle <- State { STATUS_ERROR, fmt.Errorf("%#v", r) }
 					return
 				}
 			}
 			if !childShutdown {
-				ch.stateHandle <- state{ STATUS_ERROR, nil }
+				ch.proc.stateHandle <- State{ STATUS_ERROR, nil }
 			}
 		}()
 
 		err := child.Run(p)
 		if err != nil {
 			childShutdown = true
-			ch.stateHandle <- state{ STATUS_ERROR, err }
+			ch.proc.stateHandle <- State{ STATUS_ERROR, err }
 		} else {
 			childShutdown = true
-			ch.stateHandle <- state{ STATUS_SHUTDOWN, nil }
+			ch.proc.stateHandle <- State{ STATUS_SHUTDOWN, nil }
 		}
 	})
 	ch.proc = proc
@@ -215,7 +204,7 @@ func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
 func (child *ChildProc) stop() {
 	child.proc.Control <- Control{ CONTROL_SHUTDOWN }
 	select {
-	case result := <- child.stateHandle:
+	case result := <- child.proc.stateHandle:
 		fmt.Printf("STOPPED CHILDHANDLE: %#v\n", result)
 	case <- time.After(3 * time.Second):
 		panic("Tried to stop ChildProc, but timed out after 3 seconds.")

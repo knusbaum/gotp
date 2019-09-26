@@ -20,7 +20,7 @@ func (child *TestChild) Run(proc *Proc) error {
 			
 		case <-time.After(1 * time.Second):
 			f := rand.Float64()
-			if f > 0.90 {
+			if f > 0.50 {
 				return fmt.Errorf("Failed to count to 10.")
 			}
 
@@ -87,13 +87,14 @@ func main() {
 		RestartPeriod: 10 * time.Second,
 	}
 
-	_, err := spec.Start()
-	if err != nil {
-		fmt.Printf("ERR: %v\n", err)
-		return
-	}
-	for i := 0; i < 10; i++{
-		<- time.After(5 * time.Second)
+	supervisor := spec.CreateSupervisor()
+	superProc := Spawn(func (p *Proc) { supervisor.Run(p) })
+
+	result := superProc.Wait()
+	fmt.Printf("Supervisor proc: %#v\n", result)
+	
+//	for i := 0; i < 10; i++{
+//		<- time.After(5 * time.Second)
 //		pid, ok := LookupPid("CountServer")
 //		if ok {
 //			fmt.Printf("CountServer has pid %d\n", pid)
@@ -105,24 +106,24 @@ func main() {
 //			fmt.Printf("No such server CountServer.\n")
 //		}
 
-		Spawn(func(p *Proc) {
-			reply, err := p.Call("CallCounter", &Control{0})
-			if err != nil {
-				fmt.Printf("Error: %s\n", err)
-			} else {
-				fmt.Printf("GOT REPLY: %v\n", reply)
-			}
-
-			err = Send("CallCounter", &Control{0})
-			if err != nil {
-				fmt.Printf("Error: %s\n", err)
-			}
-
-			err = p.Cast("CallCounter", &Control{0})
-			if err != nil {
-				fmt.Printf("Error: %s\n", err)
-			}
-		})
-		
-	}
+//		Spawn(func(p *Proc) {
+//			reply, err := p.Call("CallCounter", &Control{0})
+//			if err != nil {
+//				fmt.Printf("Error: %s\n", err)
+//			} else {
+//				fmt.Printf("GOT REPLY: %v\n", reply)
+//			}
+//
+//			err = Send("CallCounter", &Control{0})
+//			if err != nil {
+//				fmt.Printf("Error: %s\n", err)
+//			}
+//
+//			err = p.Cast("CallCounter", &Control{0})
+//			if err != nil {
+//				fmt.Printf("Error: %s\n", err)
+//			}
+//		})
+//		
+//	}
 }

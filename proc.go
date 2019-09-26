@@ -13,6 +13,11 @@ const (
 	CONTROL_SHUTDOWN = iota
 )
 
+type State struct {
+	status uint8
+	e error
+}
+
 type Control struct {
 	Action uint8
 }
@@ -22,6 +27,7 @@ type Proc struct {
 	Mailbox chan interface{}
 	Control chan Control
 	replySync chan interface{}
+	stateHandle chan State
 }
 
 var currPid Pid = 0
@@ -33,12 +39,14 @@ var nameRegistryLock sync.Mutex
 
 func Spawn(f func(*Proc)) *Proc {
 	mailbox := make(chan interface{}, 1024)
-	replySync := make(chan interface{})
 	control := make(chan Control, 1024)
+	replySync := make(chan interface{})
+	stateHandle := make(chan State, 1024)
 	p := &Proc{
 		Mailbox: mailbox,
 		Control: control,
 		replySync: replySync,
+		stateHandle: stateHandle,
 	}
 	pid := registerProc(p)
 	p.Pid = pid
@@ -47,12 +55,16 @@ func Spawn(f func(*Proc)) *Proc {
 		defer close(control)
 		defer close(replySync)
 		defer close(mailbox)
+		defer close(stateHandle)
 		f(p)
 	}()	
 	return p
 }
 
 
+func (p *Proc) Wait() State {
+	return <- p.stateHandle
+}
 
 func registerProc(proc *Proc) Pid {
 	pidRegistryLock.Lock()
