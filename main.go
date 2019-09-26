@@ -11,16 +11,16 @@ type TestChild struct {
 }
 
 func (child *TestChild) Run(proc *Proc) error {
-	fmt.Println("Starting TestChild")
+	fmt.Printf("Starting TestChild Proc<%v>\n", proc.Pid)
 	for {
 		select {
 
 		case <-proc.Control:
 			return nil
-			
+
 		case <-time.After(1 * time.Second):
 			f := rand.Float64()
-			if f > 0.50 {
+			if f > 0.60 {
 				return fmt.Errorf("Failed to count to 10.")
 			}
 
@@ -28,10 +28,10 @@ func (child *TestChild) Run(proc *Proc) error {
 			if child.counter > 10 {
 				return nil
 			}
-			
+
 		case msg := <-proc.Mailbox:
 			fmt.Printf("(%d) GOT: %#v\n", child.counter, msg)
-			
+
 		}
 	}
 	return nil
@@ -43,15 +43,10 @@ type CountHandler struct {
 	counter int
 }
 
-func (h *CountHandler) Init() error {
-	fmt.Println("Starting up CountHandler")
+func (h *CountHandler) Init(proc *Proc) error {
+	fmt.Printf("Starting up CountHandler Proc<%v>\n", proc.Pid)
 	return nil
 }
-
-//func (h *CountHandler) HandleCast(cast Cast) error {
-//	fmt.Println("Got CAST")
-//	return nil
-//}
 
 func (h *CountHandler) HandleCall(call Call) (interface{}, error) {
 	fmt.Println("Got CALL")
@@ -87,12 +82,34 @@ func main() {
 		RestartPeriod: 10 * time.Second,
 	}
 
-	supervisor := spec.CreateSupervisor()
-	superProc := Spawn(func (p *Proc) { supervisor.Run(p) })
+	spec2 := SupervisorSpec{
+		ChildSpecs: []ChildSpecification{
+			ChildSpecification{
+				ChildGen: func() Child { return spec.CreateSupervisor() },
+				ChildId: "CounterSupervisor",
+				Lifetime: LIFETIME_PERMANENT,
+			},
+		},
+	}
+
+	supervisor := spec2.CreateSupervisor()
+	superProc := supervisor.Start()
+
+	<- time.After(20 * time.Second)
+	state, err := superProc.Stop(5 * time.Second)
+	fmt.Printf("STATE: %#v, ERR: %#v\n", state, err)
 
 	result := superProc.Wait()
-	fmt.Printf("Supervisor proc: %#v\n", result)
-	
+	if result.status != STATUS_SHUTDOWN {
+		if result.e != nil {
+			fmt.Printf("Supervisor failed: %s\n", result.e)
+		} else {
+			fmt.Printf("Supervisor failed for unspecified reasons.\n")
+		}
+	} else {
+		fmt.Printf("Supervisor shut down.\n")
+	}
+
 //	for i := 0; i < 10; i++{
 //		<- time.After(5 * time.Second)
 //		pid, ok := LookupPid("CountServer")
@@ -124,6 +141,6 @@ func main() {
 //				fmt.Printf("Error: %s\n", err)
 //			}
 //		})
-//		
+//
 //	}
 }

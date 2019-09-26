@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"sync"
-//	"sync/atomic"
+	//	"sync/atomic"
+	"time"
 )
 
 
@@ -11,6 +12,13 @@ type Pid uint64
 
 const (
 	CONTROL_SHUTDOWN = iota
+)
+
+const (
+	STATUS_OK = iota
+	STATUS_ERROR = iota
+	STATUS_SHUTDOWN = iota
+	STATUS_RESTART = iota
 )
 
 type State struct {
@@ -28,6 +36,7 @@ type Proc struct {
 	Control chan Control
 	replySync chan interface{}
 	stateHandle chan State
+	finalState State
 }
 
 var currPid Pid = 0
@@ -37,7 +46,7 @@ var pidRegistryLock sync.Mutex
 var nameRegistry  map[string]Pid = make(map[string]Pid)
 var nameRegistryLock sync.Mutex
 
-func Spawn(f func(*Proc)) *Proc {
+func Spawn(f func(*Proc) error) *Proc {
 	mailbox := make(chan interface{}, 1024)
 	control := make(chan Control, 1024)
 	replySync := make(chan interface{})
@@ -56,20 +65,53 @@ func Spawn(f func(*Proc)) *Proc {
 		defer close(replySync)
 		defer close(mailbox)
 		defer close(stateHandle)
-		f(p)
-	}()	
+		procShutdown := false
+		defer func () {
+			if !procShutdown {
+				p.finalState = State { STATUS_ERROR, nil }
+				p.stateHandle <- p.finalState
+			}
+		}()
+
+		err := f(p)
+		if err != nil {
+			procShutdown = true
+			p.finalState = State { STATUS_ERROR, err }
+			p.stateHandle <- p.finalState
+		} else {
+			procShutdown = true
+			p.finalState = State { STATUS_SHUTDOWN, nil }
+			p.stateHandle <- p.finalState
+		}
+	}()
 	return p
 }
 
 
 func (p *Proc) Wait() State {
-	return <- p.stateHandle
+	state, ok :=  <- p.stateHandle
+	if !ok {
+		return p.finalState
+	}
+	return state
+}
+
+func (p *Proc) Stop(timeout time.Duration) (State, error) {
+	fmt.Printf("STOPPING Proc<%v>\n", p.Pid)
+	p.Control <- Control{ CONTROL_SHUTDOWN }
+	select {
+	case result := <- p.stateHandle:
+		//fmt.Printf("STOPPED PROC: %#v\n", result)
+		return result, nil
+	case <- time.After(timeout):
+		return State{}, fmt.Errorf("Tried to stop Proc<%v>, but timed out after 3 seconds.", p.Pid)
+	}
 }
 
 func registerProc(proc *Proc) Pid {
 	pidRegistryLock.Lock()
 	defer pidRegistryLock.Unlock()
-	
+
 	newPid := currPid
 	currPid++
 	pidRegistry[newPid] = proc
