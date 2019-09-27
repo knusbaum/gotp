@@ -18,9 +18,9 @@ func (child *TestChild) Run(proc *Proc) error {
 		case <-proc.Control:
 			return nil
 
-		case <-time.After(1 * time.Second):
+		case <-time.After(10 * time.Second):
 			f := rand.Float64()
-			if f > 0.60 {
+			if f > 0.50 {
 				return fmt.Errorf("Failed to count to 10.")
 			}
 
@@ -31,7 +31,6 @@ func (child *TestChild) Run(proc *Proc) error {
 
 		case msg := <-proc.Mailbox:
 			fmt.Printf("(%d) GOT: %#v\n", child.counter, msg)
-
 		}
 	}
 	return nil
@@ -58,6 +57,14 @@ func (h *CountHandler) HandleInfo(msg interface{}) error {
 	fmt.Printf("Got INFO: %#v\n", msg)
 	//panic("BAD INFO!")
 	return nil
+}
+
+type TransientChild struct {}
+
+func (tc *TransientChild) Run(proc *Proc) error {
+	fmt.Printf("##########\nSTARTING TransientChild Proc<%v>\n##########\n", proc.Pid)
+	<- time.After(3 * time.Second)
+	return fmt.Errorf("TRANSIENT FAILURE.")
 }
 
 func main() {
@@ -95,14 +102,28 @@ func main() {
 	supervisor := spec2.CreateSupervisor()
 	superProc := supervisor.Start()
 
+	Spawn(func (p *Proc) error {
+		err := SupervisorStartChildPid(p, superProc.Pid,
+			&ChildSpecification{
+				ChildGen: func() Child { return &TransientChild{} },
+				ChildId: "Transient",
+				Lifetime: LIFETIME_TRANSIENT,
+			},
+		)
+		if err != nil {
+			fmt.Printf("Failed to start child: %s\n", err)
+		}
+		return err
+	})
+		
 	<- time.After(20 * time.Second)
 	state, err := superProc.Stop(5 * time.Second)
 	fmt.Printf("STATE: %#v, ERR: %#v\n", state, err)
 
 	result := superProc.Wait()
-	if result.status != STATUS_SHUTDOWN {
-		if result.e != nil {
-			fmt.Printf("Supervisor failed: %s\n", result.e)
+	if result.Status != STATUS_SHUTDOWN {
+		if result.Err != nil {
+			fmt.Printf("Supervisor failed: %s\n", result.Err)
 		} else {
 			fmt.Printf("Supervisor failed for unspecified reasons.\n")
 		}

@@ -16,7 +16,7 @@ const (
 const (
 	LIFETIME_PERMANENT = iota
 	LIFETIME_TEMPORARY = iota
-	LIFETIME_TRANSIONT = iota
+	LIFETIME_TRANSIENT = iota
 )
 
 const (
@@ -55,7 +55,7 @@ type Supervisor struct {
 	childRestarts []time.Time
 }
 
-func (super *Supervisor) checkRestarts() error {
+func (super *Supervisor) checkRestartIntensity() error {
 	now := time.Now()
 	recentRestarts := make([]time.Time, 0)
 	for _, restart := range super.childRestarts {
@@ -72,12 +72,18 @@ func (super *Supervisor) checkRestarts() error {
 	return nil
 }
 
-func (super *Supervisor)makeSelectCases(control chan Control) []reflect.SelectCase {
+func (super *Supervisor)makeSelectCases(proc *Proc) []reflect.SelectCase {
 	cases := make([]reflect.SelectCase, 0, len(super.childHandles) + 1)
 	cases = append(cases,
 		reflect.SelectCase{
 			Dir: reflect.SelectRecv,
-			Chan: reflect.ValueOf(control),
+			Chan: reflect.ValueOf(proc.Control),
+		},
+	)
+	cases = append(cases,
+		reflect.SelectCase{
+			Dir: reflect.SelectRecv,
+			Chan: reflect.ValueOf(proc.Mailbox),
 		},
 	)
 	for _, ch := range super.childHandles {
@@ -110,13 +116,17 @@ func (super *Supervisor) stopAllChildren(state *State) {
 	}
 }
 
+func (super *Supervisor) childNeedsRestart(i int) bool {
+	return super.childHandles[i] == nil &&
+		super.ChildSpecs[i].Lifetime == LIFETIME_PERMANENT ||
+		(super.ChildSpecs[i].Lifetime == LIFETIME_TEMPORARY &&
+		(super.childStates[i].Status == STATUS_ERROR ||
+		super.childStates[i].Status == STATUS_RESTART))
+}
+
 func (super *Supervisor) restartChildren() {
 	for s := range super.ChildSpecs {
-		if super.childHandles[s] == nil &&
-			super.ChildSpecs[s].Lifetime == LIFETIME_PERMANENT ||
-			(super.ChildSpecs[s].Lifetime == LIFETIME_TEMPORARY &&
-			 (super.childStates[s].status == STATUS_ERROR ||
-			  super.childStates[s].status == STATUS_RESTART)) {
+		if super.childNeedsRestart(s) {
 			//fmt.Printf("Restarting child (%s)\n", super.ChildSpecs[chosen].ChildId)
 			handle, err := super.ChildSpecs[s].start()
 			if err != nil {
@@ -130,23 +140,6 @@ func (super *Supervisor) restartChildren() {
 }
 
 func (super *Supervisor) Start() *Proc {
-//	proc := Spawn(func (p *Proc) {
-//		superShutdown := false
-//		defer func () {
-//			if !superShutdown {
-//				p.stateHandle <- State { STATUS_ERROR, nil }
-//			}
-//		}()
-//
-//		err := super.Run(p)
-//		if err != nil {
-//			superShutdown = true
-//			p.stateHandle <- State { STATUS_ERROR, err }
-//		} else {
-//			superShutdown = true
-//			p.stateHandle <- State { STATUS_SHUTDOWN, nil }
-//		}
-//	})
 	proc := Spawn(super.Run)
 	return proc
 }
@@ -171,21 +164,37 @@ func (super *Supervisor) Run(proc *Proc) error {
 	}
 
 	for {
-		cases := super.makeSelectCases(proc.Control)
+		cases := super.makeSelectCases(proc)
 		chosen, value, _ := reflect.Select(cases)
 		if(chosen == 0) {
 			// This is the control channel.
 			fmt.Printf("Got Control Message: %#v\n", value)
 			break
+		} else if (chosen == 1) {
+			// This is the mailbox channel.			
+			switch mbValue := value.Interface().(type) {
+			case Call:
+				switch msg := mbValue.msg.(type) {
+				case *ChildSpecification:
+					fmt.Println("LAUNCH NEW CHILD")
+					proc, err := super.StartChild(msg)
+					if err != nil {
+						Reply(mbValue.from, err)
+					} else {
+						Reply(mbValue.from, proc)
+					}
+				}
+			}
+			continue
 		} else {
-			chosen -= 1
+			chosen -= 2
 		}
 
 		childState := value.Interface().(State)
-		if childState.status == STATUS_SHUTDOWN {
+		if childState.Status == STATUS_SHUTDOWN {
 			fmt.Printf("Child (%s) proc<%v> shut down.\n", super.ChildSpecs[chosen].ChildId, super.childHandles[chosen].proc.Pid)
-		} else if childState.e != nil {
-			fmt.Printf("Child (%s) proc<%v> died: %s\n", super.ChildSpecs[chosen].ChildId, super.childHandles[chosen].proc.Pid, childState.e)
+		} else if childState.Err != nil {
+			fmt.Printf("Child (%s) proc<%v> died: %s\n", super.ChildSpecs[chosen].ChildId, super.childHandles[chosen].proc.Pid, childState.Err)
 		} else {
 			fmt.Printf("Child (%s) proc<%v> died for unspecified reasons.\n", super.ChildSpecs[chosen].ChildId, super.childHandles[chosen].proc.Pid)
 		}
@@ -193,24 +202,87 @@ func (super *Supervisor) Run(proc *Proc) error {
 		super.childHandles[chosen] = nil
 		super.childStates[chosen] = childState
 
-		if super.RestartIntensity > 0 {
+		if super.ChildSpecs[chosen].Lifetime == LIFETIME_TRANSIENT {
+			super.deleteChild(chosen)
+			continue
+		}
+
+		if super.RestartIntensity > 0 && super.childNeedsRestart(chosen) {
 			super.childRestarts = append(super.childRestarts, time.Now())
 			fmt.Printf("RESTARTS: %d\n", len(super.childRestarts))
-			err := super.checkRestarts()
+			err := super.checkRestartIntensity()
 			if err != nil {
 				return err
 			}
 		}
 
-		if childState.status != STATUS_SHUTDOWN &&
+		if childState.Status != STATUS_SHUTDOWN &&
 			super.RestartStrategy == STRATEGY_ONE_FOR_ALL {
-			super.stopAllChildren(&State{status:STATUS_RESTART})
+			super.stopAllChildren(&State{ Status: STATUS_RESTART })
 		}
 
 		super.restartChildren()
 	}
 
 	return nil
+}
+
+func (super *Supervisor) StartChild(childSpec *ChildSpecification) (*Proc, error) {
+	if childSpec.Lifetime != LIFETIME_TRANSIENT {
+		return nil, fmt.Errorf("Can only start children with LIFETIME_TRANSIENT on demand.")
+	}
+
+	handle, err := childSpec.start()
+	if err != nil {
+		return nil, err
+	}
+
+	super.ChildSpecs = append(super.ChildSpecs, *childSpec)
+	super.childHandles = append(super.childHandles, &handle)
+	super.childStates = append(super.childStates, State{})
+	return handle.proc, nil
+}
+
+func SupervisorStartChildPid(self *Proc, pid Pid, childSpec *ChildSpecification) error {
+	msg, err := self.CallPid(pid, childSpec)
+	if err != nil {
+		return err
+	}
+	switch result := msg.(type) {
+	case error:
+		return result
+	default:
+		fmt.Printf("SupervisorStartChildPid: RESULT: %#v\n", result)
+	}
+	return nil
+}
+
+func SupervisorStartChild(self *Proc, name string, childSpec *ChildSpecification) error {
+	msg, err := self.Call(name, childSpec)
+	if err != nil {
+		return err
+	}
+	switch result := msg.(type) {
+	case error:
+		return result
+	default:
+		fmt.Printf("SupervisorStartChild: RESULT: %#v\n", result)
+	}
+	return nil
+}
+
+func (super *Supervisor) deleteChild(i int) {
+	copy(super.ChildSpecs[i:], super.ChildSpecs[i+1:])
+	super.ChildSpecs[len(super.ChildSpecs)-1] = ChildSpecification{}
+	super.ChildSpecs = super.ChildSpecs[:len(super.ChildSpecs)-1]
+
+	copy(super.childHandles[i:], super.childHandles[i+1:])
+	super.childHandles[len(super.childHandles)-1] = nil
+	super.childHandles = super.childHandles[:len(super.childHandles)-1]
+
+	copy(super.childStates[i:], super.childStates[i+1:])
+	super.childStates[len(super.childStates)-1] = State{}
+	super.childStates = super.childStates[:len(super.childStates)-1]
 }
 
 func (spec *SupervisorSpec) CreateSupervisor() *Supervisor {
@@ -243,22 +315,6 @@ func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
 	}
 	return
 }
-
-//func (child *ChildProc) stop() {
-////	child.proc.Control <- Control{ CONTROL_SHUTDOWN }
-////	select {
-////	case result := <- child.proc.stateHandle:
-////		fmt.Printf("STOPPED CHILDHANDLE: %#v\n", result)
-////	case <- time.After(3 * time.Second):
-////		panic("Tried to stop ChildProc, but timed out after 3 seconds.")
-////	}
-//	result, err := child.proc.Stop(3 * time.Second)
-//	if err != nil {
-//		panic(err.Error())
-//	} else {
-//		fmt.Printf("STOPPED CHILDHANDLE: %#v\n", result)
-//	}
-//}
 
 type ServerHandler interface {
 	Init(proc *Proc) error

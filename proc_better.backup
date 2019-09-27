@@ -199,13 +199,22 @@ func Reply(pid Pid, msg interface{}) error {
 	if !ok {
 		return fmt.Errorf("No such proc for Pid %v", pid)
 	}
-	proc.replySync <- msg
-	return nil
+	select {
+	case proc.replySync <- msg:
+		return nil
+	case <- time.After(1 * time.Second):
+		// This *shouldn't* happen, but we want to avoid deadlock
+		return fmt.Errorf("Failed to reply. Calling process not ready.")
+	}
 }
 
-func (p *Proc) waitReply() interface{} {
-	msg := <- p.replySync
-	return msg
+func (p *Proc) waitReply(timeout time.Duration) (interface{}, error) {
+	select {
+	case msg := <- p.replySync:
+		return msg, nil
+	case <- time.After(timeout):
+		return nil, fmt.Errorf("Timed out waiting for reply.")
+	}
 }
 
 func (p *Proc) CallPid(pid Pid, msg interface{}) (interface{}, error) {
@@ -215,8 +224,9 @@ func (p *Proc) CallPid(pid Pid, msg interface{}) (interface{}, error) {
 		return nil, err
 	}
 
-	result := p.waitReply()
-	return result, nil
+	// Want to make timeout configurable at some point.
+	timeout := 5 * time.Second
+	return p.waitReply(timeout)
 }
 
 func (p *Proc) Call(name string, msg interface{}) (interface{}, error) {
