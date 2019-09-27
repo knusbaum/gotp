@@ -241,16 +241,17 @@ func TestSupervisorStartChild(t *testing.T) {
 
 	
 	fmt.Println("Start1")
-	t1Proc, err := supervisor.StartChild(&ChildSpec{
-		ChildGen: func () Child { return &FuncChild{ transient1 } },
-		ChildId: "TRANSIENT1",
-		Lifetime: LIFETIME_TRANSIENT,
-	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t1Proc.Wait()
+	Spawn(func (p *Proc) error {
+		err := SupervisorStartChildPid(p, superProc.Pid, &ChildSpec{
+			ChildGen: func () Child { return &FuncChild{ transient1 } },
+			ChildId: "TRANSIENT1",
+			Lifetime: LIFETIME_TRANSIENT,
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		return nil
+	}).Wait()
 	fmt.Println("END Start1")
 
 	fmt.Println("Start2")

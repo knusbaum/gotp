@@ -185,7 +185,7 @@ func (super *Supervisor) Run(proc *Proc) error {
 				switch msg := mbValue.msg.(type) {
 				case *ChildSpec:
 					fmt.Println("LAUNCH NEW CHILD")
-					proc, err := super.StartChild(msg)
+					proc, err := super.startChild(msg)
 					if err != nil {
 						Reply(mbValue.from, err)
 					} else {
@@ -237,7 +237,7 @@ func (super *Supervisor) Run(proc *Proc) error {
 	return nil
 }
 
-func (super *Supervisor) StartChild(childSpec *ChildSpec) (*Proc, error) {
+func (super *Supervisor) startChild(childSpec *ChildSpec) (*Proc, error) {
 	if childSpec.Lifetime != LIFETIME_TRANSIENT {
 		return nil, fmt.Errorf("Can only start children with LIFETIME_TRANSIENT on demand.")
 	}
