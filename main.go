@@ -77,7 +77,7 @@ func main() {
 				ServiceName: "CountServer",
 			},
 			ChildSpecification{
-				ChildGen: func() Child { return &ServerChild{ &CountHandler{} } },
+				ChildGen: func() Child { return &Server{ &CountHandler{} } },
 				ChildId: "CallCounter",
 				Lifetime: LIFETIME_PERMANENT,
 				ServiceName: "CallCounter",
