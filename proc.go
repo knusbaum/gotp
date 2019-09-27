@@ -96,6 +96,18 @@ func (p *Proc) Wait() State {
 	return state
 }
 
+func (p *Proc) WaitTimeout(timeout time.Duration) (State, error) {
+	select {
+	case state, ok := <- p.stateHandle:
+		if !ok {
+			return p.finalState, nil
+		}
+		return state, nil
+	case <- time.After(timeout):
+		return State{}, fmt.Errorf("Timed out after %s", timeout.String())
+	}
+}
+
 func (p *Proc) Stop(timeout time.Duration) (State, error) {
 
 	select {
@@ -108,7 +120,7 @@ func (p *Proc) Stop(timeout time.Duration) (State, error) {
 		}
 	default:
 	}
-	
+
 	fmt.Printf("STOPPING Proc<%v>\n", p.Pid)
 	p.Control <- Control{ CONTROL_SHUTDOWN }
 	select {
@@ -199,30 +211,45 @@ func Reply(pid Pid, msg interface{}) error {
 	if !ok {
 		return fmt.Errorf("No such proc for Pid %v", pid)
 	}
-	proc.replySync <- msg
-	return nil
+	select {
+	case proc.replySync <- msg:
+		return nil
+	case <- time.After(1 * time.Second):
+		// This *shouldn't* happen, but we want to avoid deadlock
+		return fmt.Errorf("Failed to reply. Calling process not ready.")
+	}
 }
 
-func (p *Proc) waitReply() interface{} {
-	msg := <- p.replySync
-	return msg
+func (p *Proc) waitReply(timeout time.Duration) (interface{}, error) {
+	select {
+	case msg := <- p.replySync:
+		return msg, nil
+	case <- time.After(timeout):
+		return nil, fmt.Errorf("Timed out after %s waiting for reply.", timeout.String())
+	}
 }
 
-func (p *Proc) CallPid(pid Pid, msg interface{}) (interface{}, error) {
+func (p *Proc) CallPidTimeout(pid Pid, msg interface{}, timeout time.Duration) (interface{}, error) {
 	call := Call{p.Pid, msg}
 	err := SendPid(pid, call)
 	if err != nil {
 		return nil, err
 	}
-
-	result := p.waitReply()
-	return result, nil
+	return p.waitReply(timeout)
 }
 
-func (p *Proc) Call(name string, msg interface{}) (interface{}, error) {
+func (p *Proc) CallTimeout(name string, msg interface{}, timeout time.Duration) (interface{}, error) {
 	pid, ok := LookupPid(name)
 	if !ok {
 		return nil, fmt.Errorf("No such pid registered for \"%s\"", name)
 	}
-	return p.CallPid(pid, msg)
+	return p.CallPidTimeout(pid, msg, timeout)
+}
+
+func (p *Proc) CallPid(pid Pid, msg interface{}) (interface{}, error) {
+	return p.CallPidTimeout(pid, msg, 5 * time.Second)
+}
+
+func (p *Proc) Call(name string, msg interface{}) (interface{}, error) {
+	return p.CallTimeout(name, msg, 5 * time.Second)
 }

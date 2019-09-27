@@ -90,6 +90,37 @@ func TestProcMultipleWait(t *testing.T) {
 	}
 }
 
+func TestProcWaitTimeout(t *testing.T) {
+	proc := Spawn(func (proc *Proc) error {
+		<- time.After(100 * time.Millisecond)
+		return nil
+	})
+
+	state, err := proc.WaitTimeout(1 * time.Second)
+	if err != nil {
+		t.Error(err)
+	} else {
+		if state.Err != nil {
+			t.Errorf("Unexpected error: %s", state.Err)
+		}
+		if state.Status != STATUS_SHUTDOWN {
+			t.Errorf("Expected status %d, but have %d.", STATUS_SHUTDOWN, state.Status)
+		}
+	}
+}
+
+func TestProcWaitTimeoutFail(t *testing.T) {
+	proc := Spawn(func (proc *Proc) error {
+		<- time.After(10 * time.Second)
+		return nil
+	})
+
+	_, err := proc.WaitTimeout(100 * time.Millisecond)
+	if err == nil {
+		t.Errorf("Expected error, but got none.")
+	}
+}
+
 func TestProcStopSuccess(t *testing.T) {
 	proc := Spawn(func (proc *Proc) error {
 		for {
@@ -363,6 +394,153 @@ func TestCast(t *testing.T) {
 	}
 }
 
+func TestCallPidReply(t *testing.T) {
+	expectedValue := rand.Int()
+	proc := Spawn(func (p *Proc) error {
+		select {
+		case <-p.Control:
+			return nil
+		case msg := <-p.Mailbox:
+			switch call := msg.(type) {
+			case Call:
+				//fmt.Printf("Call: %#v\n", call)
+				Reply(call.from, call.msg)
+				return nil
+			}
+		}
+		return nil
+	})
+	defer proc.Stop(time.Second)
+
+	proc2 := Spawn(func (p *Proc) error {
+		ret, err := p.CallPid(proc.Pid, expectedValue)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		if ret.(int) != expectedValue {
+			t.Errorf("Expected return value %d, but got %d.", expectedValue, ret.(int))
+		}
+		return nil
+	})
+
+	_, err := proc2.WaitTimeout(10 * time.Second)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCallPidReplyErr(t *testing.T) {
+	expectedValue := rand.Int()
+	proc := Spawn(func (p *Proc) error {
+		select {
+		case <-p.Control:
+			return nil
+		case msg := <-p.Mailbox:
+			switch call := msg.(type) {
+			case Call:
+				// Send the reply too late for caller to get it.
+				<- time.After(100 * time.Millisecond)
+				err := Reply(call.from, call.msg)
+				if err == nil {
+					t.Errorf("Expected err from Reply, but got none.")
+				}
+				return nil
+			}
+		}
+		return nil
+	})
+	defer proc.Stop(time.Second)
+
+	Spawn(func (p *Proc) error {
+		// Don't wait long enough for reply.
+		_, err := p.CallPidTimeout(proc.Pid, expectedValue, 10 * time.Millisecond)
+		if err == nil {
+			t.Errorf("Expected error, but got nil.")
+		}
+		return nil
+	})
+
+	_, err := proc.WaitTimeout(10 * time.Second)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+
 func TestCallReply(t *testing.T) {
-	
+	expectedValue := rand.Int()
+	proc := Spawn(func (p *Proc) error {
+		select {
+		case <-p.Control:
+			return nil
+		case msg := <-p.Mailbox:
+			switch call := msg.(type) {
+			case Call:
+				//fmt.Printf("Call: %#v\n", call)
+				Reply(call.from, call.msg)
+				return nil
+			}
+		}
+		return nil
+	})
+	defer proc.Stop(time.Second)
+	procName := "TestCallReply"
+	RegisterName(procName, proc.Pid)
+
+	proc2 := Spawn(func (p *Proc) error {
+		ret, err := p.Call(procName, expectedValue)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		if ret.(int) != expectedValue {
+			t.Errorf("Expected return value %d, but got %d.", expectedValue, ret.(int))
+		}
+		return nil
+	})
+
+	_, err := proc2.WaitTimeout(10 * time.Second)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCallReplyErr(t *testing.T) {
+	expectedValue := rand.Int()
+	proc := Spawn(func (p *Proc) error {
+		select {
+		case <-p.Control:
+			return nil
+		case msg := <-p.Mailbox:
+			switch call := msg.(type) {
+			case Call:
+				// Send the reply too late for caller to get it.
+				<- time.After(100 * time.Millisecond)
+				err := Reply(call.from, call.msg)
+				if err == nil {
+					t.Errorf("Expected err from Reply, but got none.")
+				}
+				return nil
+			}
+		}
+		return nil
+	})
+	defer proc.Stop(time.Second)
+	procName := "TestCallReplyErr"
+	RegisterName(procName, proc.Pid)
+
+	Spawn(func (p *Proc) error {
+		// Don't wait long enough for reply.
+		_, err := p.CallTimeout(procName, expectedValue, 10 * time.Millisecond)
+		if err == nil {
+			t.Errorf("Expected error, but got nil.")
+		}
+		return nil
+	})
+
+	_, err := proc.WaitTimeout(10 * time.Second)
+	if err != nil {
+		t.Error(err)
+	}
 }
