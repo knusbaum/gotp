@@ -69,14 +69,14 @@ func (tc *TransientChild) Run(proc *Proc) error {
 
 func main() {
 	spec := SupervisorSpec{
-		ChildSpecs: []ChildSpecification{
-			ChildSpecification{
+		ChildSpecs: []ChildSpec{
+			ChildSpec{
 				ChildGen: func() Child { return &TestChild{} },
 				ChildId: "Counter",
 				Lifetime: LIFETIME_TEMPORARY,
 				ServiceName: "CountServer",
 			},
-			ChildSpecification{
+			ChildSpec{
 				ChildGen: func() Child { return &Server{ &CountHandler{} } },
 				ChildId: "CallCounter",
 				Lifetime: LIFETIME_PERMANENT,
@@ -90,8 +90,8 @@ func main() {
 	}
 
 	spec2 := SupervisorSpec{
-		ChildSpecs: []ChildSpecification{
-			ChildSpecification{
+		ChildSpecs: []ChildSpec{
+			ChildSpec{
 				ChildGen: func() Child { return spec.CreateSupervisor() },
 				ChildId: "CounterSupervisor",
 				Lifetime: LIFETIME_PERMANENT,
@@ -104,7 +104,7 @@ func main() {
 
 	Spawn(func (p *Proc) error {
 		err := SupervisorStartChildPid(p, superProc.Pid,
-			&ChildSpecification{
+			&ChildSpec{
 				ChildGen: func() Child { return &TransientChild{} },
 				ChildId: "Transient",
 				Lifetime: LIFETIME_TRANSIENT,

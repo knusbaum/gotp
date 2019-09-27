@@ -37,6 +37,7 @@ type Proc struct {
 	replySync chan interface{}
 	stateHandle chan State
 	finalState State
+	stateLock sync.Mutex
 }
 
 var currPid Pid = 0
@@ -74,6 +75,9 @@ func Spawn(f func(*Proc) error) *Proc {
 		}()
 
 		err := f(p)
+		// Need stateLock to avoid races between stateHandle, finalState and channel closes.
+		p.stateLock.Lock()
+		defer p.stateLock.Unlock()
 		if err != nil {
 			procShutdown = true
 			p.finalState = State { STATUS_ERROR, err }
@@ -109,13 +113,16 @@ func (p *Proc) WaitTimeout(timeout time.Duration) (State, error) {
 }
 
 func (p *Proc) Stop(timeout time.Duration) (State, error) {
-
+	// Make sure the proc state doesn't change between checking and sending to Control.
+	p.stateLock.Lock()
 	select {
 	case state, ok := <- p.stateHandle:
 		fmt.Printf("Proc<%v> Already Stopped.\n", p.Pid)
 		if !ok {
+			p.stateLock.Unlock()
 			return p.finalState, nil
 		} else {
+			p.stateLock.Unlock()
 			return state, nil
 		}
 	default:
@@ -123,6 +130,7 @@ func (p *Proc) Stop(timeout time.Duration) (State, error) {
 
 	fmt.Printf("STOPPING Proc<%v>\n", p.Pid)
 	p.Control <- Control{ CONTROL_SHUTDOWN }
+	p.stateLock.Unlock()
 	select {
 	case result := <- p.stateHandle:
 		//fmt.Printf("STOPPED PROC: %#v\n", result)

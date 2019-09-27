@@ -26,7 +26,18 @@ type Child interface {
 	Run(proc *Proc) error
 }
 
-type ChildSpecification struct {
+type FuncChild struct {
+	f func (proc *Proc) error
+}
+
+func (fc *FuncChild) Run(proc *Proc) error {
+	if fc.f == nil {
+		return fmt.Errorf("FuncChild has no function to execute.")
+	}
+	return fc.f(proc)
+}
+
+type ChildSpec struct {
 	ChildGen func() Child
 	ChildId string
 	Lifetime uint8
@@ -39,7 +50,7 @@ type ChildProc struct {
 }
 
 type SupervisorSpec struct {
-	ChildSpecs []ChildSpecification
+	ChildSpecs []ChildSpec
 	RestartStrategy uint8
 	RestartIntensity int
 	RestartPeriod time.Duration
@@ -125,7 +136,7 @@ func (super *Supervisor) childNeedsRestart(i int) bool {
 func (super *Supervisor) restartChildren() {
 	for s := range super.ChildSpecs {
 		if super.childNeedsRestart(s) {
-			//fmt.Printf("Restarting child (%s)\n", super.ChildSpecs[chosen].ChildId)
+			fmt.Printf("Restarting child (%s)\n", super.ChildSpecs[s].ChildId)
 			handle, err := super.ChildSpecs[s].start()
 			if err != nil {
 				// TODO: DO SOME SORT OF RECOVERY!
@@ -138,8 +149,7 @@ func (super *Supervisor) restartChildren() {
 }
 
 func (super *Supervisor) Start() *Proc {
-	proc := Spawn(super.Run)
-	return proc
+	return Spawn(super.Run)
 }
 
 func (super *Supervisor) Run(proc *Proc) error {
@@ -169,11 +179,11 @@ func (super *Supervisor) Run(proc *Proc) error {
 			fmt.Printf("Got Control Message: %#v\n", value)
 			break
 		} else if (chosen == 1) {
-			// This is the mailbox channel.			
+			// This is the mailbox channel.
 			switch mbValue := value.Interface().(type) {
 			case Call:
 				switch msg := mbValue.msg.(type) {
-				case *ChildSpecification:
+				case *ChildSpec:
 					fmt.Println("LAUNCH NEW CHILD")
 					proc, err := super.StartChild(msg)
 					if err != nil {
@@ -181,6 +191,8 @@ func (super *Supervisor) Run(proc *Proc) error {
 					} else {
 						Reply(mbValue.from, proc)
 					}
+				default:
+					Reply(mbValue.from, fmt.Errorf("Can't handle unknown call."))
 				}
 			}
 			continue
@@ -214,7 +226,7 @@ func (super *Supervisor) Run(proc *Proc) error {
 			}
 		}
 
-		if childState.Status != STATUS_SHUTDOWN &&
+		if super.childNeedsRestart(chosen) &&
 			super.RestartStrategy == STRATEGY_ONE_FOR_ALL {
 			super.stopAllChildren(&State{ Status: STATUS_RESTART })
 		}
@@ -225,7 +237,7 @@ func (super *Supervisor) Run(proc *Proc) error {
 	return nil
 }
 
-func (super *Supervisor) StartChild(childSpec *ChildSpecification) (*Proc, error) {
+func (super *Supervisor) StartChild(childSpec *ChildSpec) (*Proc, error) {
 	if childSpec.Lifetime != LIFETIME_TRANSIENT {
 		return nil, fmt.Errorf("Can only start children with LIFETIME_TRANSIENT on demand.")
 	}
@@ -241,7 +253,7 @@ func (super *Supervisor) StartChild(childSpec *ChildSpecification) (*Proc, error
 	return handle.proc, nil
 }
 
-func SupervisorStartChildPid(self *Proc, pid Pid, childSpec *ChildSpecification) error {
+func SupervisorStartChildPid(self *Proc, pid Pid, childSpec *ChildSpec) error {
 	msg, err := self.CallPid(pid, childSpec)
 	if err != nil {
 		return err
@@ -255,7 +267,7 @@ func SupervisorStartChildPid(self *Proc, pid Pid, childSpec *ChildSpecification)
 	return nil
 }
 
-func SupervisorStartChild(self *Proc, name string, childSpec *ChildSpecification) error {
+func SupervisorStartChild(self *Proc, name string, childSpec *ChildSpec) error {
 	msg, err := self.Call(name, childSpec)
 	if err != nil {
 		return err
@@ -271,7 +283,7 @@ func SupervisorStartChild(self *Proc, name string, childSpec *ChildSpecification
 
 func (super *Supervisor) deleteChild(i int) {
 	copy(super.ChildSpecs[i:], super.ChildSpecs[i+1:])
-	super.ChildSpecs[len(super.ChildSpecs)-1] = ChildSpecification{}
+	super.ChildSpecs[len(super.ChildSpecs)-1] = ChildSpec{}
 	super.ChildSpecs = super.ChildSpecs[:len(super.ChildSpecs)-1]
 
 	copy(super.childHandles[i:], super.childHandles[i+1:])
@@ -293,7 +305,7 @@ func (spec *SupervisorSpec) CreateSupervisor() *Supervisor {
 }
 
 
-func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
+func (cSpec *ChildSpec) start() (ch ChildProc, e error) {
 	child := cSpec.ChildGen()
 	proc := Spawn(func(p *Proc) (e error) {
 		defer func() {
@@ -307,6 +319,7 @@ func (cSpec *ChildSpecification) start() (ch ChildProc, e error) {
 
 		return child.Run(p)
 	})
+	fmt.Printf("CHILD<%v> STARTED\n", proc.Pid)
 	ch.proc = proc
 	if cSpec.ServiceName != "" {
 		RegisterName(cSpec.ServiceName, ch.proc.Pid)
